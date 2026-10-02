@@ -1,0 +1,134 @@
+# Pipeline gates and the waiver path (threat-model.md T1, T2, T4).
+# Four scans write JSON reports; one script applies the blocking thresholds and the waivers.
+# This workflow holds no cloud credentials and requests no OIDC token.
+name: security-gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Daily, so an expired waiver or a newly published CVE turns main red without waiting for a commit.
+    - cron: "30 2 * * *"
+
+permissions: {}
+
+env:
+  # Scanners are pinned by image digest; a moved tag cannot change what runs here.
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f # v8.30.1
+  SEMGREP_IMAGE: semgrep/semgrep@sha256:93963d9295a366f59e4850127b1550400ee7b388f04fe144e4a1f6325d96e01b # 1.179.0
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa # 0.75.0
+  KYVERNO_IMAGE: ghcr.io/kyverno/kyverno-cli@sha256:ced7b2be0b04250cabfe695f15307f69eb715fe23234816388af4f3812915b2a # v1.19.1
+  FALCO_IMAGE: falcosecurity/falco@sha256:788f1129c542171813083d4afc61b16730a47dde8c23d9c39370acef996349b6 # 0.45.0
+  SQUID_IMAGE: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029 # Squid 6.13
+
+jobs:
+  gates:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # fetch-depth: 0 fetches every commit on every branch and tag. The default is a shallow
+      # clone of one commit, which would hide secrets that were committed and later deleted.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm the full git history is present
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          echo "Commits reachable from all refs: $(git rev-list --all --count)"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the waiver script's one dependency (hash-pinned)
+        run: python -m pip install --require-hashes -r scripts/requirements.txt
+
+      # tests/test_waivers.py: the waiver and gate rules.
+      # tests/test_policies.py: the Kyverno and Trivy policies reject the bad fixtures, accept the
+      # corrected artefacts, and catch each control being broken on its own.
+      # tests/test_runtime_and_egress.py: the Falco rule and the egress allowlist are valid and scoped.
+      # tests/test_secrets_and_logging.py: secrets are mounted, never committed; log patterns behave.
+      - name: Test the waiver logic and the policies
+        env:
+          REQUIRE_POLICY_TESTS: "1" # fail, do not skip, if Docker is unavailable
+        run: python -m unittest discover -s tests
+
+      # Fails on a malformed, over-broad or expired waiver before any scan runs.
+      - name: Validate waivers (schema, scope, expiry)
+        id: waivers
+        run: python scripts/waivers.py validate
+
+      # Only enforced while a waiver or break-glass entry exists; an empty file grants nothing.
+      - name: Waiver changes must arrive in a commit GitHub has verified as signed
+        if: steps.waivers.outputs.active != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git log -1 --no-merges --format=%H -- waivers/waivers.yaml)"
+          verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${sha}" --jq '.commit.verification.verified')"
+          echo "Last change to waivers/waivers.yaml: ${sha} (verified=${verified})"
+          test "$verified" = "true"
+
+      - name: Prepare to run scanners
+        run: |
+          mkdir -p reports
+          echo "RUN=docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp -e TRIVY_CACHE_DIR=/tmp/trivy -v ${PWD}:/repo -w /repo" >> "$GITHUB_ENV"
+
+      # Scanner steps never decide pass or fail. A scanner that fails to run has its report removed,
+      # and the gate step treats a missing or unreadable report as a block (fail closed).
+
+      # Secrets: `gitleaks git` walks the commit log, not the working tree. --log-opts="--all"
+      # makes it every commit reachable from every ref, i.e. the complete repository history.
+      - name: Secret scan across the full git history (Gitleaks)
+        run: |
+          $RUN -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
+            "$GITLEAKS_IMAGE" git --no-banner --no-color --redact --log-opts="--all" --exit-code 0 \
+            --report-format json --report-path reports/gitleaks.json . 2>&1 | tee reports/gitleaks.log
+          # Gitleaks exits 0 with an empty report if it cannot read the git log. Do not trust that.
+          if grep -q ' ERR ' reports/gitleaks.log || ! grep -Eq '[1-9][0-9]* commits scanned' reports/gitleaks.log; then
+            rm -f reports/gitleaks.json
+          fi
+
+      - name: SAST (Semgrep)
+        run: |
+          $RUN "$SEMGREP_IMAGE" semgrep scan --quiet --metrics=off --config p/default \
+            --exclude reports --exclude tests/fixtures \
+            --json --output reports/semgrep.json . || rm -f reports/semgrep.json
+
+      - name: SCA, dependencies in the repository (Trivy)
+        run: |
+          $RUN "$TRIVY_IMAGE" fs --quiet --scanners vuln --severity HIGH,CRITICAL \
+            --skip-dirs reports --format json --output reports/trivy-vuln.json . || rm -f reports/trivy-vuln.json
+
+      # Built-in checks plus this repository's own checks (policies/terraform, policies/iam).
+      # tests/fixtures holds deliberately insecure inputs; they are exercised by the policy tests
+      # above, so they are skipped here and in the Semgrep step.
+      - name: IaC misconfiguration (Trivy)
+        run: |
+          $RUN "$TRIVY_IMAGE" config --quiet --severity HIGH,CRITICAL \
+            --raw-config-scanners terraform \
+            --misconfig-scanners azure-arm,cloudformation,dockerfile,helm,kubernetes,terraform,json \
+            --config-check policies/terraform --config-check policies/iam --check-namespaces user \
+            --skip-dirs reports --skip-dirs tests/fixtures \
+            --format json --output reports/trivy-config.json . || rm -f reports/trivy-config.json
+
+      # Built locally and never pushed, so base-image and OS packages are scanned before merge.
+      # This report is optional for the gate, so a failure here writes an unreadable report to block.
+      - name: SCA, container image (Trivy)
+        if: hashFiles('Dockerfile') != ''
+        run: |
+          {
+            docker build --quiet --tag accounts-api:gate . &&
+            docker save accounts-api:gate --output reports/image.tar &&
+            $RUN "$TRIVY_IMAGE" image --quiet --scanners vuln --severity HIGH,CRITICAL \
+              --input reports/image.tar --format json --output reports/trivy-image.json
+          } || echo "image scan failed" > reports/trivy-image.json
+
+      # The single merge-blocking decision. Thresholds and waiver matching live in scripts/waivers.py.
+      - name: Gate (apply thresholds and waivers)
+        run: python scripts/waivers.py gate --reports reports

@@ -1,0 +1,51 @@
+# NetworkPolicy for the egress proxy pods (namespace egress-system, owned by the platform team).
+# Specification for the proxy's own isolation; the proxy Deployment itself is not part of this
+# submission. See README.md in this directory.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-proxy
+  namespace: egress-system
+spec:
+  podSelector:
+    matchLabels:
+      app: egress-proxy
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Only accounts-api may use this proxy. Another tenant needing egress gets its own allowlist.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: accounts-api
+          podSelector:
+            matchLabels:
+              app: accounts-api
+      ports:
+        - protocol: TCP
+          port: 3128
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # HTTPS to the internet only: never to private, link-local or metadata addresses, so the
+    # proxy cannot be used as a stepping stone into the VPC.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

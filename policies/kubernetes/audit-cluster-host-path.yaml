@@ -1,0 +1,36 @@
+# Detects, cluster-wide: hostPath mounts such as /var/run/docker.sock and /var/log (threat-model.md T3).
+#
+# Mode:  AUDIT first (violations are reported, nothing is blocked)
+# Scope: every namespace except accounts-api and kube-system
+# Why:   A host mount in any tenant reaches other tenants' data on the node (T3), but log shippers and monitoring agents owned by other teams commonly use hostPath. Denying on day one would break their next deploy.
+# Promotion to Enforce: see policies/kubernetes/README.md (two-week audit, zero unexplained violations, owners assigned, teams notified).
+# The validation is identical to disallow-host-path.yaml; a test keeps the two in step.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  annotations:
+    accounts-api.mal/mode: audit
+    accounts-api.mal/scope: cluster-except-accounts-api-and-kube-system
+  name: audit-cluster-host-path
+spec:
+  validationActions: ["Audit"]
+  evaluation:
+    background:
+      enabled: true
+  autogen:
+    podControllers:
+      controllers: ["deployments", "statefulsets", "daemonsets", "jobs", "cronjobs"]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    # Every tenant namespace. accounts-api is already enforced by disallow-host-path; kube-system holds
+    # the cluster's own host-level agents.
+    - name: other-tenant-namespaces
+      expression: "!(object.metadata.namespace in ['accounts-api', 'kube-system'])"
+  validations:
+    - expression: "object.spec.?volumes.orValue([]).all(v, !has(v.hostPath))"
+      message: "hostPath volumes are not allowed: they expose the node's filesystem, runtime socket and other tenants' logs."

@@ -1,0 +1,61 @@
+# Custom runtime detection for accounts-api (Section 5; threat-model.md T2, T3, T5).
+# One rule, scoped to one container. Alert payload, routing, owner and runbook: runtime/README.md.
+#
+# Why this is specific to the workload and not a copy of a default rule:
+# - accounts-api runs a single long-lived application process. It never starts a shell, a
+#   network client, a package manager or a cloud CLI, so any such process is an intruder.
+# - The corrected manifest (kubernetes/accounts-api.yaml) has a read-only root filesystem and
+#   one writable path, /tmp. Nothing legitimate is ever executed from /tmp.
+# - Falco's default "Terminal shell in container" rule only fires for an interactive terminal
+#   and applies to every container. A shell opened through an application exploit has no
+#   terminal, so the default rule would miss it; this rule does not require one.
+
+- list: accounts_api_shells
+  items: [sh, bash, dash, ash, zsh, ksh, csh, tcsh, busybox]
+
+- list: accounts_api_network_tools
+  items: [curl, wget, nc, ncat, netcat, socat, ssh, scp, sftp, telnet, nmap, dig, nslookup]
+
+- list: accounts_api_package_managers
+  items: [apt, apt-get, dpkg, yum, dnf, rpm, apk, pip, pip3, npm, gem]
+
+- list: accounts_api_cloud_and_cluster_clis
+  items: [aws, kubectl, crictl, ctr]
+
+# The accounts-api application container only. Sidecars and other namespaces never match.
+- macro: accounts_api_container
+  condition: (k8s.ns.name = "accounts-api" and container.name = "accounts-api")
+
+- macro: accounts_api_unexpected_tool
+  condition: >
+    (proc.name in (accounts_api_shells)
+     or proc.name in (accounts_api_network_tools)
+     or proc.name in (accounts_api_package_managers)
+     or proc.name in (accounts_api_cloud_and_cluster_clis))
+
+# The only writable path in the container. Catches a renamed or dropped binary that the
+# name lists above would miss.
+- macro: accounts_api_exec_from_writable_path
+  condition: (proc.exepath startswith "/tmp/")
+
+- rule: Unexpected process in accounts-api container
+  desc: >
+    A shell, network client, package manager or cloud/cluster CLI was started inside the
+    accounts-api application container, or a binary was executed from /tmp, its only writable
+    path. The application never does either, so this indicates code execution by an attacker
+    (T2), usually the first step before reaching other tenants or the node (T3). It exists so
+    that such activity does not go unnoticed (T5).
+  condition: >
+    evt.type in (execve, execveat)
+    and accounts_api_container
+    and (accounts_api_unexpected_tool or accounts_api_exec_from_writable_path)
+  output: >
+    Unexpected process in accounts-api container
+    (process=%proc.name cmdline=%proc.cmdline exe=%proc.exepath
+    parent=%proc.pname parent_cmdline=%proc.pcmdline grandparent=%proc.aname[2]
+    user=%user.name uid=%user.uid terminal=%proc.tty cwd=%proc.cwd
+    namespace=%k8s.ns.name pod=%k8s.pod.name container=%container.name
+    container_id=%container.id image=%container.image.repository
+    image_digest=%container.image.digest)
+  priority: CRITICAL
+  tags: [accounts-api, container, process, mitre_execution, T1059]

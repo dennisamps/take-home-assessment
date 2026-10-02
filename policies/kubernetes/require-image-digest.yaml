@@ -1,0 +1,35 @@
+# Prevents: mutable image tags such as :latest (threat-model.md T1, T2).
+#
+# Mode:  ENFORCE from day one
+# Scope: namespace accounts-api
+# Why:   Only digest-pinned images match what build.yml signed. The corrected workload already complies.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  annotations:
+    accounts-api.mal/mode: enforce
+    accounts-api.mal/scope: namespace-accounts-api
+  name: require-image-digest
+spec:
+  validationActions: ["Deny"]
+  evaluation:
+    background:
+      enabled: true
+  autogen:
+    podControllers:
+      controllers: ["deployments", "statefulsets", "daemonsets", "jobs", "cronjobs"]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: accounts-api-namespace
+      expression: "object.metadata.namespace == 'accounts-api'"
+  variables:
+    - name: allContainers
+      expression: "object.spec.containers + object.spec.?initContainers.orValue([])"
+  validations:
+    - expression: "variables.allContainers.all(c, c.image.matches('@sha256:[a-f0-9]{64}$'))"
+      message: "Images must be referenced by digest (@sha256:...), not by a tag. A tag can be moved to a different image."

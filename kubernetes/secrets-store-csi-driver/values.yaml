@@ -1,0 +1,15 @@
+# Helm values the accounts-api secrets delivery depends on, for the Secrets Store CSI Driver
+# (Section 6). The driver is installed and owned by the platform team; this file is the
+# specification of the settings it must run with, not a deployment from this repository.
+
+# Secret auto-rotation is OFF by default in the driver. Without it, a mounted secret is fetched
+# once when the pod starts and never refreshed. It must be switched on explicitly.
+enableSecretRotation: true
+
+# How often the driver's reconciler re-fetches each mounted secret and rewrites the file.
+rotationPollInterval: 2m
+
+# Never copy mounted secrets into Kubernetes Secrets (also the chart default; stated so that a
+# later change is a visible diff).
+syncSecret:
+  enabled: false

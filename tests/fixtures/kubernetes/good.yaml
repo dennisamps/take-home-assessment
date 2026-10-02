@@ -1,0 +1,92 @@
+# accounts-api workload, corrected (Section 4). Defects and ranking: review/workload-manifest.md.
+# Enforced at admission by policies/kubernetes/. Traces to threat-model.md T2 and T3.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: accounts-api
+  namespace: accounts-api
+# The service account exists only to carry the AWS pod identity. The application does not call
+# the Kubernetes API, so no API token is mounted.
+automountServiceAccountToken: false
+---
+# There is deliberately no Role or RoleBinding. The supplied Role granted every verb on secrets,
+# pods and configmaps; nothing in the workload needs any of it. If API access is ever needed,
+# add a Role limited to named resources and read verbs (see policies/kubernetes/restrict-rbac.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: accounts-api
+  namespace: accounts-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: accounts-api
+  template:
+    metadata:
+      labels:
+        app: accounts-api
+    spec:
+      serviceAccountName: accounts-api
+      automountServiceAccountToken: false
+      # hostNetwork removed: the pod gets its own network namespace, which restores workload
+      # network isolation and reduces exposure to node-local services such as IMDS.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: accounts-api
+          # Pinned by digest, as produced and signed by build.yml. The zero digest is a placeholder.
+          image: 123456789012.dkr.ecr.ap-south-1.amazonaws.com/accounts-api@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          env:
+            - name: AWS_REGION
+              value: ap-south-1
+            # Paths, not values. The credentials are files mounted read-only by the Secrets Store
+            # CSI Driver (kubernetes/accounts-api-secrets.yaml), replacing envFrom. No secret is
+            # ever placed in an environment variable.
+            - name: ACCOUNTS_API_DB_CREDENTIALS_FILE
+              value: /mnt/secrets/db-credentials.json
+            - name: ACCOUNTS_API_KYC_API_KEY_FILE
+              value: /mnt/secrets/kyc-api-key
+            # Section 5 egress control: the KYC provider is reached only through the egress proxy.
+            # Everything in NO_PROXY is private and allowed directly by NetworkPolicy.
+            - name: HTTPS_PROXY
+              value: http://egress-proxy.egress-system.svc.cluster.local:3128
+            - name: NO_PROXY
+              value: .amazonaws.com,169.254.170.23,.svc,.cluster.local
+          securityContext:
+            runAsNonRoot: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Shared cluster: without limits one tenant can starve the others on the node.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /mnt/secrets
+              readOnly: true
+      volumes:
+        # The only writable path, replacing the host mounts. Logs go to stdout.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        # Section 6: secrets fetched from AWS Secrets Manager with the pod's identity and held
+        # in memory (tmpfs) on the node; never written to disk, etcd or a Kubernetes Secret.
+        - name: secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: accounts-api-secrets

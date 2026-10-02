@@ -1,0 +1,146 @@
+# Network isolation for accounts-api (Section 5).
+#   Egress (threat-model.md T4, T2): design, assumptions and limitations in kubernetes/egress-proxy/README.md.
+#   Ingress (threat-model.md T3): the two policies at the end of this file.
+#
+# NetworkPolicy matches IP addresses and pods, not DNS names, so it cannot safely say "allow the
+# KYC provider". Instead it allows exactly one way out to the internet: the egress proxy, which
+# holds the hostname allowlist (kubernetes/egress-proxy/squid.conf).
+#
+# The CIDRs below are placeholders for this VPC's private subnets.
+
+# Every pod in the namespace: no egress unless another policy allows it. A pod whose `app`
+# label is removed (incident quarantine, runtime/README.md) falls back to the two default-deny
+# policies in this file and is cut off in both directions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: accounts-api
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+---
+# Cluster DNS only. Without this the pod cannot resolve the proxy or its AWS endpoints.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: accounts-api-allow-dns
+  namespace: accounts-api
+spec:
+  podSelector:
+    matchLabels:
+      app: accounts-api
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The only route to the internet: the egress proxy, which permits the KYC provider and nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: accounts-api-allow-egress-proxy
+  namespace: accounts-api
+spec:
+  podSelector:
+    matchLabels:
+      app: accounts-api
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: egress-system
+          podSelector:
+            matchLabels:
+              app: egress-proxy
+      ports:
+        - protocol: TCP
+          port: 3128
+---
+# Private dependencies inside the VPC. None of these is an internet destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: accounts-api-allow-private-dependencies
+  namespace: accounts-api
+spec:
+  podSelector:
+    matchLabels:
+      app: accounts-api
+  policyTypes: ["Egress"]
+  egress:
+    # RDS PostgreSQL, in the database subnets.
+    - to:
+        - ipBlock:
+            cidr: 10.0.20.0/24
+        - ipBlock:
+            cidr: 10.0.21.0/24
+      ports:
+        - protocol: TCP
+          port: 5432
+    # AWS APIs through VPC interface endpoints, in the endpoint subnet. The pod itself calls
+    # Kinesis; Secrets Manager is called on its behalf by the CSI provider on the node (Section 6).
+    - to:
+        - ipBlock:
+            cidr: 10.0.30.0/24
+      ports:
+        - protocol: TCP
+          port: 443
+    # EKS Pod Identity Agent on the node, which issues the pod's AWS credentials.
+    - to:
+        - ipBlock:
+            cidr: 169.254.170.23/32
+      ports:
+        - protocol: TCP
+          port: 80
+---
+# Ingress (threat-model.md T3): other tenants in the shared cluster must not be able to connect
+# to accounts-api. Every pod in the namespace: no ingress unless another policy allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: accounts-api
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# The one expected ingress path: the ALB behind CloudFront.
+#
+# ASSUMPTION: the ALB is managed by the AWS Load Balancer Controller with IP targets, so it
+# connects straight to pod IPs from its own subnets and appears as an IP source, not as a pod.
+# 10.0.40.0/24 and 10.0.41.0/24 are PLACEHOLDERS for the ALB subnets, and 8080 is a PLACEHOLDER
+# for the application's listening port. If ingress instead arrives through an in-cluster
+# ingress controller, replace the ipBlocks with that controller's namespaceSelector and podSelector.
+#
+# No other pod, namespace or address may connect, including other pods in this namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: accounts-api-allow-ingress-from-alb
+  namespace: accounts-api
+spec:
+  podSelector:
+    matchLabels:
+      app: accounts-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.40.0/24
+        - ipBlock:
+            cidr: 10.0.41.0/24
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,31 @@
+# Temporary, approved exceptions to the security gates. Rules and process: waivers/README.md.
+# Emergency bypass: break-glass.md. Changes to this file need platform-team approval (CODEOWNERS).
+#
+# Example waiver (commented out so that nothing is waived by default):
+#
+#   - id: W-2026-001
+#     scanner: trivy-vuln              # gitleaks | semgrep | trivy-vuln | trivy-config
+#     rule: CVE-2020-14343             # CVE, misconfiguration ID, Semgrep rule or Gitleaks rule
+#     path: requirements.txt           # the one file the finding is reported in
+#     resource: pyyaml                 # package (trivy-vuln), Terraform resource (trivy-config),
+#                                      # commit SHA (gitleaks); not used for semgrep
+#     reason: Upgrade needs a parser change; the vulnerable loader is not reachable from user input.
+#     reference: SEC-123               # ticket key or https URL
+#     requested_by: "@alice"
+#     approved_by: "@bob"              # must be a different person
+#     created_at: 2026-10-01
+#     expires_at: 2026-10-21           # at most 30 days after created_at
+#
+# Example break-glass entry:
+#
+#   - id: BG-2026-001
+#     incident: INC-42
+#     reason: Production outage; the rollback fix must ship before the dependency fix lands.
+#     invoked_by: "@alice"
+#     approved_by: "@bob"
+#     invoked_at: 2026-10-02T14:00:00Z
+#     expires_at: 2026-10-03T02:00:00Z   # at most 24 hours after invoked_at
+
+waivers: []
+
+break_glass: []

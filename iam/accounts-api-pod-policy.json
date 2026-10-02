@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOwnSecretsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:ap-south-1:111122223333:secret:accounts-api/db-credentials-??????",
+        "arn:aws:secretsmanager:ap-south-1:111122223333:secret:accounts-api/kyc-api-key-??????"
+      ]
+    },
+    {
+      "Sid": "DecryptOwnSecretsThroughSecretsManagerOnly",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:ap-south-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.ap-south-1.amazonaws.com"
+        },
+        "StringLike": {
+          "kms:EncryptionContext:SecretARN": "arn:aws:secretsmanager:ap-south-1:111122223333:secret:accounts-api/*"
+        }
+      }
+    },
+    {
+      "Sid": "ConsumeAccountEventsStreamOnly",
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:DescribeStreamSummary",
+        "kinesis:ListShards",
+        "kinesis:GetShardIterator",
+        "kinesis:GetRecords"
+      ],
+      "Resource": "arn:aws:kinesis:ap-south-1:111122223333:stream/accounts-events"
+    }
+  ]
+}

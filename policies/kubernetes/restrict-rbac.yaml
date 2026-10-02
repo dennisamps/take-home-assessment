@@ -1,0 +1,46 @@
+# Prevents: a Role granting verbs ["*"] on secrets, pods and configmaps (threat-model.md T2, T3).
+#
+# Mode:  ENFORCE from day one
+# Scope: namespace accounts-api
+# Why:   A wildcard Role was the most exploitable supplied defect. The corrected workload has no Role at all.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  annotations:
+    accounts-api.mal/mode: enforce
+    accounts-api.mal/scope: namespace-accounts-api
+  name: restrict-rbac
+spec:
+  validationActions: ["Deny"]
+  evaluation:
+    background:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["roles"]
+  matchConditions:
+    - name: accounts-api-namespace
+      expression: "object.metadata.namespace == 'accounts-api'"
+  variables:
+    - name: rules
+      expression: "object.?rules.orValue([])"
+  validations:
+    - expression: >-
+        variables.rules.all(r,
+          !r.?verbs.orValue([]).exists(v, v == '*') &&
+          !r.?resources.orValue([]).exists(x, x == '*') &&
+          !r.?apiGroups.orValue([]).exists(g, g == '*'))
+      message: "Roles must list explicit apiGroups, resources and verbs; '*' is not allowed."
+    - expression: >-
+        variables.rules.all(r,
+          !r.?resources.orValue([]).exists(x, x == 'secrets' || x == 'configmaps') ||
+          (r.?resourceNames.orValue([]).size() > 0 && r.?verbs.orValue([]).all(v, v == 'get')))
+      message: "Access to secrets or configmaps must name the objects (resourceNames) and be limited to the verb get."
+    - expression: >-
+        variables.rules.all(r,
+          !r.?resources.orValue([]).exists(x, x == 'pods') ||
+          r.?verbs.orValue([]).all(v, v in ['get', 'list', 'watch']))
+      message: "A workload role must not create, change or delete pods."

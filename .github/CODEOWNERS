@@ -1,0 +1,14 @@
+# Paths that can weaken a security control need platform-team approval (threat-model.md T1).
+# Effective only with branch protection that requires code-owner review.
+/waivers/            @mal/platform-team
+/.gitleaksignore     @mal/platform-team
+/scripts/            @mal/platform-team
+/break-glass.md      @mal/platform-team
+/.github/            @mal/platform-team
+/iam/                @mal/platform-team
+/terraform/          @mal/platform-team
+/kubernetes/         @mal/platform-team
+/policies/           @mal/platform-team
+/runtime/            @mal/platform-team
+/data-protection/    @mal/platform-team
+/tests/              @mal/platform-team

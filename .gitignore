@@ -1,0 +1,23 @@
+# Scanner output from running the security gates locally
+reports/
+
+# Terraform working files. State and variable files can hold account details and secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+
+.DS_Store
+__pycache__/
+
+# Local Python environment for running the tests
+.venv/
+
+# Upload documents generated from the repository files; submitted separately, not committed
+deliverables/
+
+# Editor and AI-assistant local settings
+.vscode/
+.idea/
+.claude/

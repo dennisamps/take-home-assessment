@@ -1,0 +1,48 @@
+# Prevents: runAsUser: 0 with no container hardening (threat-model.md T2, T3).
+#
+# Mode:  ENFORCE from day one
+# Scope: namespace accounts-api
+# Why:   Root, privilege escalation and extra capabilities turn an application bug into a container escape. The corrected workload already complies.
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  annotations:
+    accounts-api.mal/mode: enforce
+    accounts-api.mal/scope: namespace-accounts-api
+  name: require-hardened-containers
+spec:
+  validationActions: ["Deny"]
+  evaluation:
+    background:
+      enabled: true
+  autogen:
+    podControllers:
+      controllers: ["deployments", "statefulsets", "daemonsets", "jobs", "cronjobs"]
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: accounts-api-namespace
+      expression: "object.metadata.namespace == 'accounts-api'"
+  variables:
+    - name: allContainers
+      expression: "object.spec.containers + object.spec.?initContainers.orValue([])"
+  validations:
+    - expression: >-
+        variables.allContainers.all(c, c.?securityContext.?runAsNonRoot.orValue(false)) &&
+        variables.allContainers.all(c, c.?securityContext.?runAsUser.orValue(1) != 0) &&
+        object.spec.?securityContext.?runAsUser.orValue(1) != 0
+      message: "Containers must not run as root: set runAsNonRoot: true on every container and never runAsUser: 0."
+    - expression: "variables.allContainers.all(c, !c.?securityContext.?privileged.orValue(false))"
+      message: "Privileged containers are not allowed."
+    - expression: "variables.allContainers.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)"
+      message: "Every container must set allowPrivilegeEscalation: false."
+    - expression: "variables.allContainers.all(c, c.?securityContext.?readOnlyRootFilesystem.orValue(false))"
+      message: "Every container must set readOnlyRootFilesystem: true; use an emptyDir for scratch space."
+    - expression: "variables.allContainers.all(c, c.?securityContext.?capabilities.?drop.orValue([]).exists(d, d == 'ALL'))"
+      message: "Every container must drop all Linux capabilities: capabilities.drop: [\"ALL\"]."
+    - expression: "object.spec.?securityContext.?seccompProfile.?type.orValue('') == 'RuntimeDefault'"
+      message: "The pod must set securityContext.seccompProfile.type: RuntimeDefault."
